@@ -525,16 +525,9 @@ function M.add_visual_selection_to_new_session()
   local bufnr = api.nvim_get_current_buf()
   local reference = create_reference(bufnr, start_pos[2], end_pos[2])
   if not reference then return false end
-  local start_row = start_pos[2] - 1
-  local start_col = start_pos[3] - 1
-  local end_row = end_pos[2] - 1
-  local end_col = end_pos[3]
-  local lines = api.nvim_buf_get_text(bufnr, start_row, start_col, end_row, end_col, {})
-  local code_text = table.concat(lines, "\n")
-  local message = ("Consider this code:\n\n```\n%s\n```\n\n%s"):format(code_text, reference)
   if not M.restart() then return false end
-  if not send_to_agent(message .. "\n") then return false end
-  notify("Sent selection to new Cursor Agent session.", vim.log.levels.INFO)
+  if not send_to_agent(reference .. " ") then return false end
+  notify(("Started new session and added reference: %s"):format(reference), vim.log.levels.INFO)
   return true
 end
 

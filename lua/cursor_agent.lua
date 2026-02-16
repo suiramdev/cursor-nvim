@@ -1105,6 +1105,7 @@ local function capture_visual_selection()
   end
 
   local bufnr = api.nvim_get_current_buf()
+  local path = api.nvim_buf_get_name(bufnr)
   local vmode = fn.visualmode() or "v"
 
   local srow, scol = start_pos[2], start_pos[3]
@@ -1142,6 +1143,8 @@ local function capture_visual_selection()
 
   return {
     bufnr = bufnr,
+    path = path,
+    file_mtime = (path ~= "" and fn.getftime(path)) or -1,
     mode = mode_normalized,
     start_row = srow,
     start_col = scol,
@@ -1150,6 +1153,53 @@ local function capture_visual_selection()
     lines = lines,
     filetype = vim.bo[bufnr].filetype or "text",
   }
+end
+
+local function refresh_quick_edit_source_buffer(selection, mode)
+  if mode ~= "edit" then return end
+  if not selection or not selection.path or selection.path == "" then return end
+
+  local before_mtime = tonumber(selection.file_mtime or -1) or -1
+  local after_mtime = fn.getftime(selection.path)
+  if type(after_mtime) ~= "number" or after_mtime < 0 then return end
+  if before_mtime >= 0 and after_mtime <= before_mtime then return end
+
+  local bufnr = selection.bufnr
+  if not is_valid_buf(bufnr) then
+    notify("Quick Edit updated file on disk. Reopen it to load latest changes.", vim.log.levels.INFO)
+    return
+  end
+
+  if api.nvim_get_option_value("modified", { buf = bufnr }) then
+    notify("Quick Edit updated file on disk, but buffer has unsaved changes; skipping reload.", vim.log.levels.WARN)
+    return
+  end
+
+  local reloaded = false
+  local wins = fn.win_findbuf(bufnr)
+  for _, win in ipairs(wins) do
+    if is_valid_win(win) then
+      local ok = pcall(api.nvim_win_call, win, function()
+        local view = fn.winsaveview()
+        vim.cmd "silent! keepalt keepjumps edit!"
+        pcall(fn.winrestview, view)
+      end)
+      if ok then
+        reloaded = true
+        break
+      end
+    end
+  end
+
+  if not reloaded then
+    reloaded = pcall(api.nvim_buf_call, bufnr, function()
+      vim.cmd "silent! keepalt keepjumps edit!"
+    end)
+  end
+
+  if not reloaded then
+    notify("Quick Edit finished, but failed to refresh edited file buffer.", vim.log.levels.WARN)
+  end
 end
 
 -- Input popup state (separate from preview so we can close it after submit)
@@ -1326,6 +1376,7 @@ local function start_quick_edit_job(prompt, selection, mode)
         clear_quick_spinner()
         quick_state.job_id = nil
         quick_state.stream_exit_code = code
+        refresh_quick_edit_source_buffer(selection, mode)
 
         if code ~= 0 or #quick_state.stream_stderr > 0 then
           local err_head = ("[Quick Edit] agent exited with code %d"):format(code)

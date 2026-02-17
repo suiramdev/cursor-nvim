@@ -7,6 +7,14 @@ local defaults = {
   path = {
     relative_to_cwd = true,
   },
+  terminal = {
+    default_name = "Agent",
+    auto_number = true,
+  },
+  -- "float" = floating window (default); "right" | "left" | "bottom" | "top" = split on that side
+  position = "float",
+  -- For split layout: fraction of editor (0-1) or absolute columns/lines (>=1). Ignored when position == "float".
+  split_size = 0.4,
   float = {
     width = 0.9,
     height = 0.8,
@@ -22,10 +30,6 @@ local defaults = {
 local state = {
   setup_done = false,
   opts = nil,
-  buf = nil,
-  win = nil,
-  job_id = nil,
-  augroup = nil,
 }
 
 local quick_state = {

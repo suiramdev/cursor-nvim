@@ -5,12 +5,14 @@ local notify = require("cursor_agent.notify")
 local references = require("cursor_agent.references")
 local diagnostics = require("cursor_agent.diagnostics")
 local util = require("cursor_agent.util")
+local chats = require("cursor_agent.chats")
 local session = require("cursor_agent.agent.session")
 local terminal = require("cursor_agent.agent.terminal")
 local window = require("cursor_agent.agent.window")
 local autocmds = require("cursor_agent.agent.autocmds")
 local commands = require("cursor_agent.commands")
 local quick_edit_job = require("cursor_agent.quick_edit.job")
+local picker = require("cursor_agent.picker")
 
 local M = {}
 
@@ -29,11 +31,35 @@ function M.setup(opts)
   return M
 end
 
-function M.open()
+local function close_cb()
+  session.close()
+end
+
+--- Normalize layout: "vsplit" -> "right", "hsplit" -> "bottom".
+local function normalize_layout(layout)
+  if not layout or layout == "" then
+    return nil
+  end
+  local L = layout:lower()
+  if L == "vsplit" then
+    return "right"
+  end
+  if L == "hsplit" then
+    return "bottom"
+  end
+  return layout
+end
+
+function M.open(opts)
   if not config.setup_done() then
     M.setup()
   end
-  if not session.ensure_session(false, nil, session.close) then
+  local layout_override = opts and normalize_layout(opts.layout)
+  local active_id = chats.get_active_id()
+  if not active_id then
+    active_id = chats.create(nil)
+  end
+  if not session.ensure_session(active_id, false, nil, close_cb, layout_override) then
     return false
   end
   if config.opts().auto_insert then
@@ -52,8 +78,8 @@ function M.toggle()
   if not config.setup_done() then
     M.setup()
   end
-  local state = config.get_state()
-  if util.is_valid_win(state.win) then
+  local active = chats.get_active()
+  if active and util.is_valid_win(active.win) then
     M.close()
     return true
   end
@@ -64,7 +90,11 @@ function M.resume()
   if not config.setup_done() then
     M.setup()
   end
-  if not session.ensure_session(true, nil, session.close) then
+  local active_id = chats.get_active_id()
+  if not active_id then
+    active_id = chats.create(nil)
+  end
+  if not session.ensure_session(active_id, true, nil, close_cb) then
     return false
   end
   if config.opts().auto_insert then
@@ -79,7 +109,11 @@ function M.list_sessions()
   if not config.setup_done() then
     M.setup()
   end
-  if not session.ensure_session(false, { "ls" }, session.close) then
+  local active_id = chats.get_active_id()
+  if not active_id then
+    active_id = chats.create(nil)
+  end
+  if not session.ensure_session(active_id, false, { "ls" }, close_cb) then
     return false
   end
   if config.opts().auto_insert then
@@ -94,14 +128,66 @@ function M.restart()
   if not config.setup_done() then
     M.setup()
   end
-
-  if terminal.is_job_running() then
-    pcall(fn.jobstop, config.get_state().job_id)
+  local active_id = chats.get_active_id()
+  if active_id and terminal.is_job_running(active_id) then
+    local chat = chats.get(active_id)
+    if chat and chat.job_id then
+      pcall(fn.jobstop, chat.job_id)
+    end
   end
-  config.get_state().job_id = nil
-
-  window.delete_buffer()
+  if active_id then
+    window.delete_buffer(active_id)
+  end
   return M.open()
+end
+
+function M.new_chat(name)
+  if not config.setup_done() then
+    M.setup()
+  end
+  local id = chats.create(name)
+  session.ensure_session(id, false, nil, close_cb)
+  if config.opts().auto_insert then
+    vim.schedule(function()
+      vim.cmd.startinsert()
+    end)
+  end
+  return id
+end
+
+function M.select_chat()
+  if not config.setup_done() then
+    M.setup()
+  end
+  if not chats.has_chats() then
+    M.new_chat(nil)
+    return
+  end
+  picker.pick_chat()
+end
+
+function M.rename_chat(name)
+  if not config.setup_done() then
+    M.setup()
+  end
+  local active = chats.get_active()
+  if not active then
+    notify.notify("No active chat to rename. Create one first.", vim.log.levels.WARN)
+    return false
+  end
+  if name and name:match("%S") then
+    if chats.rename(active.id, name) then
+      notify.notify("Chat renamed to: " .. name, vim.log.levels.INFO)
+      return true
+    end
+    return false
+  end
+  picker.rename_prompt(active.name, function(new_name)
+    if new_name and chats.rename(active.id, new_name) then
+      notify.notify("Chat renamed to: " .. new_name, vim.log.levels.INFO)
+    end
+  end)
+  return true
 end
 
 function M.add_selection(line_start, line_end, bufnr)

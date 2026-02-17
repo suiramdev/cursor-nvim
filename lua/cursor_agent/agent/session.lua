@@ -5,6 +5,7 @@ local config = require("cursor_agent.config")
 local notify = require("cursor_agent.notify")
 local references = require("cursor_agent.references")
 local util = require("cursor_agent.util")
+local chats = require("cursor_agent.chats")
 local window = require("cursor_agent.agent.window")
 local terminal = require("cursor_agent.agent.terminal")
 
@@ -36,20 +37,27 @@ function M.ensure_command_is_available()
   return true
 end
 
-function M.start_agent_session(resume_last, extra_args, close_cb)
+--- Start agent in a chat (create buf, open window, termopen). Uses chat.buf, chat.win, chat.job_id.
+function M.start_agent_session(chat_id, resume_last, extra_args, close_cb, layout_override)
   if not M.ensure_command_is_available() then
     return false
   end
 
-  local state = config.get_state()
-  if util.is_valid_buf(state.buf) then
-    window.delete_buffer()
+  local chat = chats.get(chat_id)
+  if not chat then
+    return false
   end
 
-  state.buf = api.nvim_create_buf(false, false)
-  terminal.configure_terminal_buffer(state.buf, close_cb)
+  if util.is_valid_buf(chat.buf) then
+    window.delete_buffer(chat_id)
+  end
 
-  if not window.open_window(close_cb) then
+  chat.buf = api.nvim_create_buf(false, false)
+  api.nvim_buf_set_var(chat.buf, "cursor_agent_chat_id", chat_id)
+  terminal.configure_terminal_buffer(chat.buf, close_cb, chat_id)
+
+  local open_opts = layout_override and { position = layout_override } or nil
+  if not window.open_window(chat_id, close_cb, open_opts) then
     notify.notify("Unable to open Cursor Agent terminal window.", vim.log.levels.ERROR)
     return false
   end
@@ -65,12 +73,12 @@ function M.start_agent_session(resume_last, extra_args, close_cb)
     end
   end
 
-  local job_id = api.nvim_buf_call(state.buf, function()
+  local job_id = api.nvim_buf_call(chat.buf, function()
     return fn.termopen(cmd, {
       cwd = cwd,
       on_exit = function(_, code)
         vim.schedule(function()
-          state.job_id = nil
+          chats.set_job_id(chat_id, nil)
           if code ~= 0 then
             notify.notify(("Cursor Agent exited with code %d"):format(code), vim.log.levels.WARN)
           else
@@ -86,26 +94,35 @@ function M.start_agent_session(resume_last, extra_args, close_cb)
     return false
   end
 
-  state.job_id = job_id
+  chats.set_job_id(chat_id, job_id)
   return true
 end
 
-function M.ensure_session(resume_last, extra_args, close_cb)
-  local reuse = not resume_last and not (extra_args and #extra_args > 0)
-  if reuse and terminal.is_job_running() and util.is_valid_buf(config.get_state().buf) then
-    return window.open_window(close_cb)
+--- Ensure chat has a running session or start one. Reuse existing window if same chat and job running.
+--- layout_override: optional "float"|"right"|"left"|"bottom"|"top" for this open only.
+function M.ensure_session(chat_id, resume_last, extra_args, close_cb, layout_override)
+  local chat = chats.get(chat_id)
+  if not chat then
+    return false
   end
-  return M.start_agent_session(resume_last, extra_args, close_cb)
+
+  local reuse = not resume_last and not (extra_args and #extra_args > 0)
+  if reuse and terminal.is_job_running(chat_id) and util.is_valid_buf(chat.buf) then
+    local open_opts = layout_override and { position = layout_override } or nil
+    return window.open_window(chat_id, close_cb, open_opts)
+  end
+  return M.start_agent_session(chat_id, resume_last, extra_args, close_cb, layout_override)
 end
 
-function M.send_to_agent(text)
-  if not terminal.is_job_running() then
+function M.send_to_agent(text, chat_id)
+  chat_id = chat_id or chats.get_active_id()
+  if not chat_id or not terminal.is_job_running(chat_id) then
     notify.notify("Cursor Agent is not running.", vim.log.levels.ERROR)
     return false
   end
 
-  local state = config.get_state()
-  local sent = fn.chansend(state.job_id, text)
+  local chat = chats.get(chat_id)
+  local sent = fn.chansend(chat.job_id, text)
   if type(sent) ~= "number" or sent <= 0 then
     notify.notify("Failed sending text to Cursor Agent.", vim.log.levels.ERROR)
     return false
@@ -114,8 +131,11 @@ function M.send_to_agent(text)
   return true
 end
 
-function M.close()
-  window.close_window()
+function M.close(chat_id)
+  chat_id = chat_id or chats.get_active_id()
+  if chat_id then
+    window.close_window(chat_id)
+  end
   return true
 end
 
